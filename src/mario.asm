@@ -1,7 +1,8 @@
 ; =====================================================================
 ; File    : mario.asm
 ; Project : Super Mario Engine (EL2003 COAL Semester Project)
-; Modules : 1 (skeleton) and 2 (video mode, PutPixel, FillRect)
+; Modules : 1 (skeleton), 2 (video, PutPixel, FillRect),
+;           3 (level map, GetTile, DrawTile, DrawMap, ResetMap)
 ; Build   : tools\nasm.exe -f bin src\mario.asm -o MARIO.COM
 ; =====================================================================
 
@@ -15,6 +16,7 @@ SCREEN_W        equ 320         ; screen width in pixels
 SCREEN_H        equ 200         ; screen height in pixels
 VIDEO_SEG       equ 0A000h      ; VGA Mode 13h video segment
 TILE_SIZE       equ 16          ; tile / sprite size in pixels
+VISIBLE_COLS    equ 20          ; tile columns visible on screen
 LEVEL_COLS      equ 60          ; level width in tiles
 LEVEL_ROWS      equ 12          ; level height in tiles
 LEVEL_SIZE      equ LEVEL_COLS * LEVEL_ROWS     ; 720 bytes
@@ -39,6 +41,21 @@ COL_PINK        equ 13
 COL_YELLOW      equ 14
 COL_WHITE       equ 15
 
+; --- Tile codes ---
+TILE_SKY        equ 0
+TILE_GROUND     equ 1
+TILE_BRICK      equ 2
+TILE_Q_COIN     equ 3
+TILE_Q_MUSH     equ 4
+TILE_EMPTY      equ 5
+TILE_PIPE_TL    equ 6
+TILE_PIPE_TR    equ 7
+TILE_PIPE_BL    equ 8
+TILE_PIPE_BR    equ 9
+TILE_STAIR      equ 10
+TILE_COIN       equ 11
+TILE_FLAG       equ 12
+
 ; ---------------------------------------------------------------------
 ; CODE
 ; ---------------------------------------------------------------------
@@ -46,14 +63,16 @@ start:
         jmp  main               ; jump over to the main procedure
 
 ; Procedure : main
-; Purpose   : Program entry. Sets Mode 13h, shows the colour test
-;             screen, waits for a key, restores text mode, exits.
+; Purpose   : Program entry. Sets Mode 13h, loads the map, draws the
+;             first 20 columns, waits for a key, then exits to DOS.
 ; Inputs    : none
 ; Outputs   : none
 ; Registers : all (program ends here)
 main:
         call SetVideoMode13     ; switch to 320x200x256 graphics
-        call ColourTestScreen   ; draw one box per colour
+        call ResetMap           ; working map = original map
+        push 0                  ; camera_x = 0 for this test
+        call DrawMap            ; draw visible part of the level
         call WaitForKey         ; keep the picture on screen
         call RestoreTextMode    ; back to text mode
         call ExitToDos          ; terminate program
@@ -139,9 +158,10 @@ PutPixel:
         ret  6
 
 ; Procedure : FillRect
-; Purpose   : Fill a rectangle with one colour.
-; Inputs    : stack: x, y, width, height, colour (all words), pushed
-;             in this order
+; Purpose   : Fill a rectangle with one colour. Pixels that fall
+;             outside the screen are skipped (clipping).
+; Inputs    : stack: x, y, width, height, colour (words), pushed
+;             in this order. x may be negative (signed).
 ; Outputs   : none
 ; Registers : none changed. Callee removes 5 parameters (ret 10).
 ; Stack     : [bp+12]=x [bp+10]=y [bp+8]=width [bp+6]=height
@@ -153,37 +173,47 @@ FillRect:
         push bx
         push cx
         push dx
+        push si
         push di
         push es
 
         mov  ax, VIDEO_SEG
         mov  es, ax             ; ES -> video memory
 
-        mov  bx, [bp+10]        ; BX = y
-        mov  ax, bx
-        shl  ax, 8              ; y * 256
-        shl  bx, 6              ; y * 64
-        add  ax, bx             ; y * 320
-        add  ax, [bp+12]        ; + x
-        mov  di, ax             ; DI = start of the first row
-
-        mov  al, [bp+4]         ; AL = colour
         mov  dx, [bp+6]         ; DX = rows left to draw
-
+        mov  si, [bp+10]        ; SI = current y
 .row_loop:
-        mov  cx, [bp+8]         ; CX = width (pixels in this row)
-        push di                 ; remember start of this row
+        cmp  si, SCREEN_H       ; y outside 0..199? (unsigned check
+        jae  .skip_row          ; also catches negative y)
+
+        ; BX = start offset of this row = y * 320
+        mov  ax, si
+        shl  ax, 8              ; y * 256
+        mov  bx, si
+        shl  bx, 6              ; y * 64
+        add  bx, ax             ; y * 320
+
+        mov  cx, [bp+8]         ; CX = width
+        mov  di, [bp+12]        ; DI = current x
+        mov  al, [bp+4]         ; AL = colour
 .pixel_loop:
+        cmp  di, SCREEN_W       ; x outside 0..319? skip this pixel
+        jae  .skip_pixel
+        push di
+        add  di, bx             ; DI = y*320 + x
         mov  [es:di], al        ; write one pixel
+        pop  di
+.skip_pixel:
         inc  di                 ; next pixel to the right
-        loop .pixel_loop        ; CX = CX - 1, repeat until 0
-        pop  di                 ; back to start of the row
-        add  di, SCREEN_W       ; move down one row (+320)
-        dec  dx                 ; one row done
-        jnz  .row_loop          ; more rows? repeat
+        loop .pixel_loop
+.skip_row:
+        inc  si                 ; next row down
+        dec  dx
+        jnz  .row_loop
 
         pop  es
         pop  di
+        pop  si
         pop  dx
         pop  cx
         pop  bx
@@ -191,63 +221,178 @@ FillRect:
         pop  bp
         ret  10
 
-; Procedure : ColourTestScreen
-; Purpose   : Show 16 colour boxes (4 x 4 grid) so every game colour
-;             can be checked. Also draws one pixel with PutPixel.
+; Procedure : ResetMap
+; Purpose   : Copy the original map over the working map.
 ; Inputs    : none
-; Outputs   : none
+; Outputs   : none (map_working = map_original)
 ; Registers : none changed
-; Layout    : box x = 20 + col*75, box y = 20 + row*45
-;             (computed with additions, no MUL, so DX stays safe)
-ColourTestScreen:
+ResetMap:
+        push cx
+        push si
+        push di
+        push es
+        push ds
+        pop  es                 ; ES = DS (same segment in a .COM)
+        cld                     ; copy forward
+        mov  si, map_original   ; source
+        mov  di, map_working    ; destination
+        mov  cx, LEVEL_SIZE     ; 720 bytes
+        rep  movsb              ; block copy
+        pop  es
+        pop  di
+        pop  si
+        pop  cx
+        ret
+
+; Procedure : GetTile
+; Purpose   : Find the tile code at a pixel position of the level.
+; Inputs    : stack: px, py (words), pushed in this order
+; Outputs   : AL = tile code (0 if outside the level)
+; Registers : AX changed (result); others unchanged. ret 4.
+; Stack     : [bp+6]=px  [bp+4]=py
+GetTile:
+        push bp
+        mov  bp, sp
+        push bx
+        push cx
+
+        mov  bx, [bp+6]         ; BX = px
+        shr  bx, 4              ; BX = column
+        mov  cx, [bp+4]         ; CX = py
+        shr  cx, 4              ; CX = row
+
+        cmp  bx, LEVEL_COLS     ; column outside 0..59?
+        jae  .outside
+        cmp  cx, LEVEL_ROWS     ; row outside 0..11?
+        jae  .outside
+
+        ; index = row * 60 + column = row*64 - row*4 + column
+        mov  ax, cx
+        shl  ax, 6              ; row * 64
+        shl  cx, 2              ; row * 4
+        sub  ax, cx             ; row * 60
+        add  ax, bx             ; + column
+        mov  bx, ax
+        mov  al, [map_working + bx]   ; read tile code
+        jmp  .done
+.outside:
+        xor  al, al             ; outside the level = sky
+.done:
+        pop  cx
+        pop  bx
+        pop  bp
+        ret  4
+
+; Procedure : DrawTile
+; Purpose   : Draw one 16x16 tile as a coloured block (placeholder
+;             art; real tile art can replace it later).
+; Inputs    : stack: x, y (screen position, x may be negative),
+;             tile code. Pushed in this order.
+; Outputs   : none
+; Registers : none changed. ret 6.
+; Stack     : [bp+8]=x  [bp+6]=y  [bp+4]=tile code
+DrawTile:
+        push bp
+        mov  bp, sp
+        push ax
+        push bx
+
+        mov  bx, [bp+4]         ; BX = tile code
+        mov  al, [tile_colours + bx]    ; AL = colour of this tile
+        xor  ah, ah             ; AX = colour
+
+        push word [bp+8]        ; x
+        push word [bp+6]        ; y
+        push TILE_SIZE          ; width
+        push TILE_SIZE          ; height
+        push ax                 ; colour
+        call FillRect
+
+        pop  bx
+        pop  ax
+        pop  bp
+        ret  6
+
+; Procedure : DrawMap
+; Purpose   : Draw the visible part of the level (20 columns plus one
+;             partial column) for a given camera position.
+; Inputs    : stack: camera_x (word)
+; Outputs   : none
+; Registers : none changed. ret 2.
+; Stack     : [bp+4]=camera_x
+; Method    : first column = camera_x >> 4, pixel offset =
+;             camera_x AND 15, so the picture scrolls pixel by pixel.
+DrawMap:
+        push bp
+        mov  bp, sp
         push ax
         push bx
         push cx
         push dx
+        push si
 
-        xor  bx, bx             ; BX = colour number 0..15
-.next_box:
-        ; ---- box x = 20 + col * 75 ----
-        mov  cx, bx
-        and  cx, 3              ; CX = column (0..3)
-        mov  dx, 20             ; DX = 20 (start x)
-        jcxz .x_done            ; column 0: x stays 20
-.x_loop:
-        add  dx, 75             ; one more column: +75
-        loop .x_loop
-.x_done:                        ; DX = box x
+        mov  ax, [bp+4]         ; AX = camera_x
+        mov  si, ax
+        shr  si, 4              ; SI = first column to draw
+        and  ax, 15             ; AX = pixel offset (0..15)
+        mov  dx, ax             ; DX = offset (kept)
 
-        ; ---- box y = 20 + row * 45 ----
-        mov  cx, bx
-        shr  cx, 2              ; CX = row (0..3)
-        mov  ax, 20             ; AX = 20 (start y)
-        jcxz .y_done            ; row 0: y stays 20
-.y_loop:
-        add  ax, 45             ; one more row: +45
-        loop .y_loop
-.y_done:                        ; AX = box y
+        xor  cx, cx             ; CX = row (0..11)
+.row_loop:
+        xor  bx, bx             ; BX = screen column (0..20)
+.col_loop:
+        ; tile column in the level = SI + BX
+        push bx
+        mov  ax, si
+        add  ax, bx             ; AX = level column
+        cmp  ax, LEVEL_COLS
+        jae  .skip_tile         ; past the end of the level
 
-        push dx                 ; parameter 1: x
+        ; tile index = row*60 + column
+        push ax                 ; save column
+        mov  ax, cx
+        shl  ax, 6              ; row * 64
+        mov  bx, cx
+        shl  bx, 2              ; row * 4
+        sub  ax, bx             ; row * 60
+        pop  bx                 ; BX = column
+        add  bx, ax             ; BX = index
+        mov  al, [map_working + bx]
+        xor  ah, ah             ; AX = tile code
+        pop  bx                 ; BX = screen column again
+        push bx
+
+        ; screen x = BX*16 - offset ; screen y = row*16
+        push ax                 ; keep tile code
+        mov  ax, bx
+        shl  ax, 4              ; BX * 16
+        sub  ax, dx             ; minus pixel offset
+        push ax                 ; parameter 1: x
+        mov  ax, cx
+        shl  ax, 4
         push ax                 ; parameter 2: y
-        push 60                 ; parameter 3: width
-        push 40                 ; parameter 4: height
-        push bx                 ; parameter 5: colour
-        call FillRect
+        mov  bx, sp
+        mov  ax, [bx+4]         ; AX = saved tile code
+        push ax                 ; parameter 3: tile code
+        call DrawTile
+        pop  ax                 ; drop the saved tile code
+.skip_tile:
+        pop  bx                 ; BX = screen column
+        inc  bx
+        cmp  bx, VISIBLE_COLS + 1
+        jb   .col_loop
 
-        inc  bx                 ; next colour
-        cmp  bx, 16
-        jb   .next_box          ; repeat for colours 0..15
+        inc  cx
+        cmp  cx, LEVEL_ROWS
+        jb   .row_loop
 
-        push 5                  ; PutPixel test: x = 5
-        push 5                  ;                y = 5
-        push COL_WHITE
-        call PutPixel
-
+        pop  si
         pop  dx
         pop  cx
         pop  bx
         pop  ax
-        ret
+        pop  bp
+        ret  2
 
 ; ---------------------------------------------------------------------
 ; DATA
@@ -259,3 +404,39 @@ camera_x        dw 0            ; world x of left screen edge
 
 ; --- Keyboard state table: 1 = key held ---
 key_table       times 128 db 0
+
+; --- Colour of each tile code (placeholder art) ---
+tile_colours:
+        db COL_SKY              ; 0  sky
+        db COL_BROWN            ; 1  ground
+        db COL_RED              ; 2  brick
+        db COL_YELLOW           ; 3  ? block (coin)
+        db COL_YELLOW           ; 4  ? block (mushroom)
+        db COL_DGRAY            ; 5  empty block
+        db COL_GREEN            ; 6  pipe top-left
+        db COL_GREEN            ; 7  pipe top-right
+        db COL_LGREEN           ; 8  pipe body-left
+        db COL_LGREEN           ; 9  pipe body-right
+        db COL_LGRAY            ; 10 stair block
+        db COL_WHITE            ; 11 coin
+        db COL_BLACK            ; 12 flag pole
+
+; --- Level map: 60 columns x 12 rows, one byte per tile ---
+; (small test map: sky, a few blocks, ground. Real level comes next)
+map_original:
+        times 60 db 0                           ; row 0  (HUD row)
+        times 60 db 0                           ; row 1
+        times 60 db 0                           ; row 2
+        times 60 db 0                           ; row 3
+        times 60 db 0                           ; row 4
+        times 60 db 0                           ; row 5
+        times 60 db 0                           ; row 6
+        db 0,0,0,0,0,0,0,0,0,0,3,2,3,2,0,0,0,0,0,0
+        times 40 db 0                           ; row 7
+        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        times 40 db 0                           ; row 8
+        times 60 db 0                           ; row 9
+        times 60 db 1                           ; row 10 (ground)
+        times 60 db 1                           ; row 11 (ground)
+
+map_working     times LEVEL_SIZE db 0           ; changes during the game
