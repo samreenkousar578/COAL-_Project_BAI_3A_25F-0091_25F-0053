@@ -2,7 +2,8 @@
 ; File    : mario.asm
 ; Project : Super Mario Engine (EL2003 COAL Semester Project)
 ; Modules : 1 (skeleton), 2 (video, PutPixel, FillRect),
-;           3 (level map, GetTile, DrawTile, DrawMap, ResetMap)
+;           3 (level map, GetTile, DrawTile, DrawMap, ResetMap),
+;           4 (sprites: DrawSprite)
 ; Build   : tools\nasm.exe -f bin src\mario.asm -o MARIO.COM
 ; =====================================================================
 
@@ -56,6 +57,10 @@ TILE_STAIR      equ 10
 TILE_COIN       equ 11
 TILE_FLAG       equ 12
 
+; --- Sprite flags ---
+SPR_MIRROR      equ 1           ; bit 0: draw flipped left-right
+SPR_HIDE        equ 2           ; bit 1: do not draw (blink effect)
+
 ; ---------------------------------------------------------------------
 ; CODE
 ; ---------------------------------------------------------------------
@@ -63,8 +68,8 @@ start:
         jmp  main               ; jump over to the main procedure
 
 ; Procedure : main
-; Purpose   : Program entry. Sets Mode 13h, loads the map, draws the
-;             first 20 columns, waits for a key, then exits to DOS.
+; Purpose   : Program entry. Draws the map and four test sprites
+;             (normal, mirrored, clipped right, clipped left).
 ; Inputs    : none
 ; Outputs   : none
 ; Registers : all (program ends here)
@@ -73,6 +78,31 @@ main:
         call ResetMap           ; working map = original map
         push 0                  ; camera_x = 0 for this test
         call DrawMap            ; draw visible part of the level
+
+        push 32                 ; x = 32
+        push 144                ; y = 144 (standing on the ground)
+        push spr_mario_stand    ; sprite address
+        push 0                  ; flags: normal
+        call DrawSprite
+
+        push 80                 ; x = 80
+        push 144
+        push spr_mario_stand
+        push SPR_MIRROR         ; flags: mirrored (facing left)
+        call DrawSprite
+
+        push 300                ; x = 300: partly off the right edge
+        push 144
+        push spr_mario_stand
+        push 0
+        call DrawSprite
+
+        push -8                 ; x = -8: partly off the left edge
+        push 100
+        push spr_mario_stand
+        push 0
+        call DrawSprite
+
         call WaitForKey         ; keep the picture on screen
         call RestoreTextMode    ; back to text mode
         call ExitToDos          ; terminate program
@@ -394,6 +424,86 @@ DrawMap:
         pop  bp
         ret  2
 
+; Procedure : DrawSprite
+; Purpose   : Draw a 16x16 sprite. Colour 0 is transparent. Pixels
+;             outside the screen are skipped (clipping).
+; Inputs    : stack: x, y, address of sprite data, flags (words),
+;             pushed in this order. x, y may be negative.
+; Outputs   : none
+; Registers : none changed. ret 8.
+; Stack     : [bp+10]=x [bp+8]=y [bp+6]=address [bp+4]=flags
+DrawSprite:
+        push bp
+        mov  bp, sp
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        push es
+
+        test word [bp+4], SPR_HIDE
+        jnz  .finished          ; blink frame: draw nothing
+
+        mov  ax, VIDEO_SEG
+        mov  es, ax             ; ES -> video memory
+        mov  si, [bp+6]         ; SI -> sprite data
+        mov  dx, 0              ; DX = row counter (0..15)
+
+.row_loop:
+        mov  bx, [bp+8]
+        add  bx, dx             ; BX = screen y of this row
+        cmp  bx, SCREEN_H       ; outside 0..199?
+        jae  .next_row_skip     ; skip whole row (SI must still move)
+
+        mov  ax, bx
+        shl  ax, 8              ; y * 256
+        shl  bx, 6              ; y * 64
+        add  bx, ax             ; BX = y * 320 = row offset
+
+        xor  cx, cx             ; CX = column counter (0..15)
+.col_loop:
+        ; pixel to read: normal = column, mirrored = 15 - column
+        mov  di, cx
+        test word [bp+4], SPR_MIRROR
+        jz   .read
+        mov  di, 15
+        sub  di, cx
+.read:
+        add  di, si             ; DI = sprite address + column
+        mov  al, [di]           ; AL = sprite pixel colour
+        cmp  al, 0
+        je   .next_col          ; transparent: skip
+
+        mov  di, [bp+10]
+        add  di, cx             ; DI = screen x of this pixel
+        cmp  di, SCREEN_W
+        jae  .next_col          ; outside screen: skip
+        add  di, bx             ; DI = y*320 + x
+        mov  [es:di], al        ; draw pixel
+.next_col:
+        inc  cx
+        cmp  cx, 16
+        jb   .col_loop
+
+.next_row_skip:
+        add  si, 16             ; next row of sprite data
+        inc  dx
+        cmp  dx, 16
+        jb   .row_loop
+
+.finished:
+        pop  es
+        pop  di
+        pop  si
+        pop  dx
+        pop  cx
+        pop  bx
+        pop  ax
+        pop  bp
+        ret  8
+
 ; ---------------------------------------------------------------------
 ; DATA
 ; ---------------------------------------------------------------------
@@ -421,6 +531,26 @@ tile_colours:
         db COL_WHITE            ; 11 coin
         db COL_BLACK            ; 12 flag pole
 
+; --- Small Mario standing, 16 x 16, colour 0 = transparent ---
+; 4 = red, 1 = blue, 14 = yellow (skin), 6 = brown
+spr_mario_stand:
+        db 0,0,0,0,4,4,4,4,4,0,0,0,0,0,0,0
+        db 0,0,0,4,4,4,4,4,4,4,4,4,0,0,0,0
+        db 0,0,0,6,6,6,14,14,6,14,0,0,0,0,0,0
+        db 0,0,6,14,6,14,14,14,6,14,14,14,0,0,0,0
+        db 0,0,6,14,6,6,14,14,14,6,14,14,14,0,0,0
+        db 0,0,6,6,14,14,14,14,6,6,6,6,0,0,0,0
+        db 0,0,0,0,14,14,14,14,14,14,14,0,0,0,0,0
+        db 0,0,0,4,4,1,4,4,4,0,0,0,0,0,0,0
+        db 0,0,4,4,4,1,4,4,1,4,4,4,0,0,0,0
+        db 0,4,4,4,4,1,1,1,1,4,4,4,4,0,0,0
+        db 0,14,14,4,1,14,1,1,14,1,4,14,14,0,0,0
+        db 0,14,14,14,1,1,1,1,1,1,14,14,14,0,0,0
+        db 0,14,14,1,1,1,1,1,1,1,1,14,14,0,0,0
+        db 0,0,0,1,1,1,0,0,1,1,1,0,0,0,0,0
+        db 0,0,6,6,6,0,0,0,0,6,6,6,0,0,0,0
+        db 0,6,6,6,6,0,0,0,0,6,6,6,6,0,0,0
+
 ; --- Level map: 60 columns x 12 rows, one byte per tile ---
 ; (small test map: sky, a few blocks, ground. Real level comes next)
 map_original:
@@ -433,8 +563,7 @@ map_original:
         times 60 db 0                           ; row 6
         db 0,0,0,0,0,0,0,0,0,0,3,2,3,2,0,0,0,0,0,0
         times 40 db 0                           ; row 7
-        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        times 40 db 0                           ; row 8
+        times 60 db 0                           ; row 8
         times 60 db 0                           ; row 9
         times 60 db 1                           ; row 10 (ground)
         times 60 db 1                           ; row 11 (ground)
