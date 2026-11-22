@@ -68,8 +68,9 @@ start:
         jmp  main               ; jump over to the main procedure
 
 ; Procedure : main
-; Purpose   : Program entry. Draws the map and four test sprites
-;             (normal, mirrored, clipped right, clipped left).
+; Purpose   : Program entry. Draws the map and test sprites
+;             (normal, mirrored, clipped, Goomba, coin, mushroom,
+;             and one hidden sprite to test SPR_HIDE).
 ; Inputs    : none
 ; Outputs   : none
 ; Registers : all (program ends here)
@@ -101,6 +102,30 @@ main:
         push 100
         push spr_mario_stand
         push 0
+        call DrawSprite
+
+        push 120                ; Goomba on the ground
+        push 144
+        push spr_goomba
+        push 0
+        call DrawSprite
+
+        push 150                ; Coin in the air
+        push 100
+        push spr_coin
+        push 0
+        call DrawSprite
+
+        push 180                ; Mushroom on the ground
+        push 144
+        push spr_mushroom
+        push 0
+        call DrawSprite
+
+        push 210                ; Mushroom with SPR_HIDE: must NOT appear
+        push 144
+        push spr_mushroom
+        push SPR_HIDE
         call DrawSprite
 
         call WaitForKey         ; keep the picture on screen
@@ -550,6 +575,65 @@ spr_mario_stand:
         db 0,0,0,1,1,1,0,0,1,1,1,0,0,0,0,0
         db 0,0,6,6,6,0,0,0,0,6,6,6,0,0,0,0
         db 0,6,6,6,6,0,0,0,0,6,6,6,6,0,0,0
+
+; --- Goomba walking, 16 x 16 ---
+; 6 = brown body, 14 = yellow feet/face, 15 = white eyes, 8 = dark
+spr_goomba:
+        db 0,0,0,0,0,0,6,6,6,6,0,0,0,0,0,0
+        db 0,0,0,0,6,6,6,6,6,6,6,6,0,0,0,0
+        db 0,0,0,6,6,6,6,6,6,6,6,6,6,0,0,0
+        db 0,0,6,6,6,6,6,6,6,6,6,6,6,6,0,0
+        db 0,6,6,15,15,6,6,6,6,6,15,15,6,6,6,0
+        db 0,6,6,15,8,6,6,6,6,6,15,8,6,6,6,0
+        db 0,6,6,6,6,6,6,6,6,6,6,6,6,6,6,0
+        db 0,0,6,6,6,6,6,6,6,6,6,6,6,6,0,0
+        db 0,0,0,0,14,14,14,14,14,14,14,14,0,0,0,0
+        db 0,0,0,14,14,14,14,14,14,14,14,14,14,0,0,0
+        db 0,0,0,14,14,14,14,14,14,14,14,14,14,0,0,0
+        db 0,0,0,0,14,14,14,14,14,14,14,14,0,0,0,0
+        db 0,0,8,8,8,8,0,0,0,0,8,8,8,8,0,0
+        db 0,8,8,8,8,8,8,0,0,8,8,8,8,8,8,0
+        db 0,8,8,8,8,8,8,0,0,8,8,8,8,8,8,0
+        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+; --- Coin, 16 x 16 ---
+spr_coin:
+        db 0,0,0,0,0,0,14,14,14,14,0,0,0,0,0,0
+        db 0,0,0,0,0,14,14,14,14,14,14,0,0,0,0,0
+        db 0,0,0,0,14,14,14,6,6,14,14,14,0,0,0,0
+        db 0,0,0,0,14,14,6,14,14,6,14,14,0,0,0,0
+        db 0,0,0,0,14,14,6,14,14,6,14,14,0,0,0,0
+        db 0,0,0,0,14,14,6,14,14,6,14,14,0,0,0,0
+        db 0,0,0,0,14,14,6,14,14,6,14,14,0,0,0,0
+        db 0,0,0,0,14,14,6,14,14,6,14,14,0,0,0,0
+        db 0,0,0,0,14,14,6,14,14,6,14,14,0,0,0,0
+        db 0,0,0,0,14,14,6,14,14,6,14,14,0,0,0,0
+        db 0,0,0,0,14,14,14,6,6,14,14,14,0,0,0,0
+        db 0,0,0,0,0,14,14,14,14,14,14,0,0,0,0,0
+        db 0,0,0,0,0,0,14,14,14,14,0,0,0,0,0,0
+        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+; --- Mushroom, 16 x 16 ---
+; 4 = red cap, 15 = white spots, 14 = stem
+spr_mushroom:
+        db 0,0,0,0,0,0,4,4,4,4,0,0,0,0,0,0
+        db 0,0,0,0,4,4,4,4,4,4,4,4,0,0,0,0
+        db 0,0,0,4,4,15,15,4,4,15,15,4,4,0,0,0
+        db 0,0,4,4,15,15,15,4,4,15,15,15,4,4,0,0
+        db 0,4,4,4,15,15,4,4,4,4,15,15,4,4,4,0
+        db 0,4,4,4,4,4,4,4,4,4,4,4,4,4,4,0
+        db 0,4,4,15,15,4,4,4,4,4,4,15,15,4,4,0
+        db 0,0,4,15,15,4,4,4,4,4,4,15,15,4,0,0
+        db 0,0,0,0,14,14,14,14,14,14,14,14,0,0,0,0
+        db 0,0,0,0,14,14,15,14,14,15,14,14,0,0,0,0
+        db 0,0,0,0,14,14,14,14,14,14,14,14,0,0,0,0
+        db 0,0,0,0,14,14,14,14,14,14,14,14,0,0,0,0
+        db 0,0,0,0,0,14,14,14,14,14,14,0,0,0,0,0
+        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
 ; --- Level map: 60 columns x 12 rows, one byte per tile ---
 ; (small test map: sky, a few blocks, ground. Real level comes next)
