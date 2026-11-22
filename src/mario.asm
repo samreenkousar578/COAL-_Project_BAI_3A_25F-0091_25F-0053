@@ -3,7 +3,8 @@
 ; Project : Super Mario Engine (EL2003 COAL Semester Project)
 ; Modules : 1 (skeleton), 2 (video, PutPixel, FillRect),
 ;           3 (level map, GetTile, DrawTile, DrawMap, ResetMap),
-;           4 (sprites: DrawSprite)
+;           4 (sprites: DrawSprite),
+;           5 (off-screen frame buffer: Alloc, Clear, Flip)
 ; Build   : tools\nasm.exe -f bin src\mario.asm -o MARIO.COM
 ; =====================================================================
 
@@ -23,6 +24,11 @@ LEVEL_ROWS      equ 12          ; level height in tiles
 LEVEL_SIZE      equ LEVEL_COLS * LEVEL_ROWS     ; 720 bytes
 START_LIVES     equ 3           ; lives at new game
 LEVEL_TIME      equ 300         ; seconds per life
+
+; --- Frame buffer ---
+FRAME_WORDS     equ 32000       ; 64000 bytes = 32000 words
+FRAME_PARAS     equ 4000        ; 64000 / 16 paragraphs
+PROGRAM_PARAS   equ 1000h       ; memory kept for the program (64 KB)
 
 ; --- Colours (default VGA palette indexes) ---
 COL_BLACK       equ 0
@@ -68,41 +74,26 @@ start:
         jmp  main               ; jump over to the main procedure
 
 ; Procedure : main
-; Purpose   : Program entry. Draws the map and test sprites
-;             (normal, mirrored, clipped, Goomba, coin, mushroom,
-;             and one hidden sprite to test SPR_HIDE).
+; Purpose   : Program entry. Test for Module 5: every frame the map,
+;             sprites and a moving Mario are drawn into the off-screen
+;             buffer, then copied to the screen in one block move.
+;             Press any key to quit.
 ; Inputs    : none
 ; Outputs   : none
 ; Registers : all (program ends here)
 main:
+        call AllocFrameBuffer   ; get memory for the frame buffer
+        jc   .no_memory         ; DOS refused: report and quit
+
         call SetVideoMode13     ; switch to 320x200x256 graphics
         call ResetMap           ; working map = original map
+
+.frame_loop:
+        call WaitRetrace        ; sync to the monitor refresh
+        call ClearFrame         ; wipe the off-screen buffer
+
         push 0                  ; camera_x = 0 for this test
-        call DrawMap            ; draw visible part of the level
-
-        push 32                 ; x = 32
-        push 144                ; y = 144 (standing on the ground)
-        push spr_mario_stand    ; sprite address
-        push 0                  ; flags: normal
-        call DrawSprite
-
-        push 80                 ; x = 80
-        push 144
-        push spr_mario_stand
-        push SPR_MIRROR         ; flags: mirrored (facing left)
-        call DrawSprite
-
-        push 300                ; x = 300: partly off the right edge
-        push 144
-        push spr_mario_stand
-        push 0
-        call DrawSprite
-
-        push -8                 ; x = -8: partly off the left edge
-        push 100
-        push spr_mario_stand
-        push 0
-        call DrawSprite
+        call DrawMap            ; draw the level into the buffer
 
         push 120                ; Goomba on the ground
         push 144
@@ -122,15 +113,39 @@ main:
         push 0
         call DrawSprite
 
-        push 210                ; Mushroom with SPR_HIDE: must NOT appear
+        push 210                ; hidden sprite: must NOT appear
         push 144
         push spr_mushroom
         push SPR_HIDE
         call DrawSprite
 
-        call WaitForKey         ; keep the picture on screen
+        push word [test_x]      ; moving Mario
+        push 144
+        push spr_mario_stand
+        push 0
+        call DrawSprite
+
+        call FlipFrame          ; copy buffer to the screen
+
+        add  word [test_x], 2   ; move 2 pixels right
+        cmp  word [test_x], 320
+        jl   .still_visible
+        mov  word [test_x], -16 ; wrap around to the left edge
+.still_visible:
+        mov  ah, 01h            ; BIOS: is a key waiting?
+        int  16h
+        jz   .frame_loop        ; no key: next frame
+
+        xor  ah, ah             ; read (and discard) the key
+        int  16h
         call RestoreTextMode    ; back to text mode
         call ExitToDos          ; terminate program
+
+.no_memory:
+        mov  dx, msg_nomem      ; print an error message
+        mov  ah, 09h
+        int  21h
+        call ExitToDos
 
 ; Procedure : WaitForKey
 ; Purpose   : Wait until the user presses any key (BIOS INT 16h).
@@ -177,8 +192,118 @@ SetVideoMode13:
         pop  ax
         ret
 
+; Procedure : AllocFrameBuffer
+; Purpose   : Shrink our memory block to 64 KB, then ask DOS for
+;             4000 paragraphs (64000 bytes) for the frame buffer.
+; Inputs    : none
+; Outputs   : frame_seg = segment of the buffer; CF = 1 on failure
+; Registers : none changed (flags only)
+AllocFrameBuffer:
+        push ax
+        push bx
+        push es
+
+        push cs
+        pop  es                 ; ES = our own segment (PSP)
+        mov  bx, PROGRAM_PARAS  ; keep 64 KB for ourselves
+        mov  ah, 4Ah            ; DOS: resize memory block
+        int  21h
+        jc   .fail
+
+        mov  bx, FRAME_PARAS    ; paragraphs wanted
+        mov  ah, 48h            ; DOS: allocate memory
+        int  21h
+        jc   .fail
+        mov  [frame_seg], ax    ; AX = segment of the new block
+        clc                     ; success
+        jmp  .done
+.fail:
+        stc                     ; failure
+.done:
+        pop  es
+        pop  bx
+        pop  ax
+        ret
+
+; Procedure : ClearFrame
+; Purpose   : Fill the whole frame buffer with the sky colour using
+;             one block store (REP STOSW).
+; Inputs    : none
+; Outputs   : none (buffer = sky colour)
+; Registers : none changed
+ClearFrame:
+        push ax
+        push cx
+        push di
+        push es
+
+        mov  es, [frame_seg]    ; ES -> frame buffer
+        xor  di, di             ; start at offset 0
+        mov  ax, (COL_SKY << 8) | COL_SKY   ; two pixels per word
+        mov  cx, FRAME_WORDS    ; 32000 words
+        cld                     ; go forward
+        rep  stosw              ; fill buffer
+
+        pop  es
+        pop  di
+        pop  cx
+        pop  ax
+        ret
+
+; Procedure : FlipFrame
+; Purpose   : Copy the frame buffer to video memory with one block
+;             move (REP MOVSW).
+; Inputs    : none
+; Outputs   : none (screen = buffer)
+; Registers : none changed
+FlipFrame:
+        push cx
+        push si
+        push di
+        push ds
+        push es
+
+        mov  ax, VIDEO_SEG
+        mov  es, ax             ; destination = video memory
+        mov  ds, [frame_seg]    ; source = frame buffer
+        xor  si, si
+        xor  di, di
+        mov  cx, FRAME_WORDS    ; 32000 words
+        cld
+        rep  movsw              ; copy whole screen
+
+        pop  es
+        pop  ds
+        pop  di
+        pop  si
+        pop  cx
+        ret
+
+; Procedure : WaitRetrace
+; Purpose   : Wait for the start of the monitor's vertical retrace
+;             (VGA port 3DAh, bit 3) so drawing is synchronised.
+;             Temporary; the timer interrupt (Module 8) replaces it.
+; Inputs    : none
+; Outputs   : none
+; Registers : none changed
+WaitRetrace:
+        push ax
+        push dx
+        mov  dx, 3DAh           ; VGA input status register
+.wait_end:
+        in   al, dx
+        test al, 8              ; retrace in progress?
+        jnz  .wait_end          ; yes: wait until it ends
+.wait_start:
+        in   al, dx
+        test al, 8
+        jz   .wait_start        ; wait until the next one begins
+        pop  dx
+        pop  ax
+        ret
+
 ; Procedure : PutPixel
-; Purpose   : Draw one pixel on the screen (video memory).
+; Purpose   : Draw one pixel into the frame buffer.
 ; Inputs    : stack: x, y, colour (words), pushed in this order
 ; Outputs   : none
 ; Registers : none changed. Callee removes its 3 parameters (ret 6).
@@ -191,8 +316,7 @@ PutPixel:
         push di
         push es
 
-        mov  ax, VIDEO_SEG
-        mov  es, ax             ; ES -> video memory
+        mov  es, [frame_seg]    ; ES -> frame buffer
 
         mov  bx, [bp+6]         ; BX = y
         mov  ax, bx
@@ -203,7 +327,7 @@ PutPixel:
         mov  di, ax             ; DI = offset of the pixel
 
         mov  ax, [bp+4]         ; AL = colour
-        mov  [es:di], al        ; write pixel to screen
+        mov  [es:di], al        ; write pixel into buffer
 
         pop  es
         pop  di
@@ -213,8 +337,8 @@ PutPixel:
         ret  6
 
 ; Procedure : FillRect
-; Purpose   : Fill a rectangle with one colour. Pixels that fall
-;             outside the screen are skipped (clipping).
+; Purpose   : Fill a rectangle in the frame buffer with one colour.
+;             Pixels outside the screen are skipped (clipping).
 ; Inputs    : stack: x, y, width, height, colour (words), pushed
 ;             in this order. x may be negative (signed).
 ; Outputs   : none
@@ -232,8 +356,7 @@ FillRect:
         push di
         push es
 
-        mov  ax, VIDEO_SEG
-        mov  es, ax             ; ES -> video memory
+        mov  es, [frame_seg]    ; ES -> frame buffer
 
         mov  dx, [bp+6]         ; DX = rows left to draw
         mov  si, [bp+10]        ; SI = current y
@@ -450,8 +573,8 @@ DrawMap:
         ret  2
 
 ; Procedure : DrawSprite
-; Purpose   : Draw a 16x16 sprite. Colour 0 is transparent. Pixels
-;             outside the screen are skipped (clipping).
+; Purpose   : Draw a 16x16 sprite into the frame buffer. Colour 0 is
+;             transparent. Pixels outside the screen are skipped.
 ; Inputs    : stack: x, y, address of sprite data, flags (words),
 ;             pushed in this order. x, y may be negative.
 ; Outputs   : none
@@ -471,8 +594,7 @@ DrawSprite:
         test word [bp+4], SPR_HIDE
         jnz  .finished          ; blink frame: draw nothing
 
-        mov  ax, VIDEO_SEG
-        mov  es, ax             ; ES -> video memory
+        mov  es, [frame_seg]    ; ES -> frame buffer
         mov  si, [bp+6]         ; SI -> sprite data
         mov  dx, 0              ; DX = row counter (0..15)
 
@@ -536,6 +658,11 @@ DrawSprite:
 mario_x         dw 32 * 256     ; world x, start at pixel 32
 mario_y         dw 0            ; world y
 camera_x        dw 0            ; world x of left screen edge
+
+; --- Frame buffer and test data ---
+frame_seg       dw 0            ; segment of the off-screen buffer
+test_x          dw 0            ; x of the moving test Mario
+msg_nomem       db 'Not enough memory for the frame buffer.$'
 
 ; --- Keyboard state table: 1 = key held ---
 key_table       times 128 db 0
